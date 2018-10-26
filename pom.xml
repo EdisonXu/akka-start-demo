@@ -7,12 +7,14 @@
     <groupId>com.ex.demo</groupId>
     <artifactId>akka-start-demo</artifactId>
     <version>1.0-SNAPSHOT</version>
-    <modules>
-        <module>cluster</module>
-    </modules>
     <packaging>pom</packaging>
     <name>akka-start-demo</name>
     <url>http://edisonxu.com</url>
+
+    <modules>
+        <module>cluster</module>
+        <module>remoting</module>
+    </modules>
 
     <properties>
         <java.version>1.8</java.version>
@@ -65,6 +67,11 @@
             <dependency>
                 <groupId>com.typesafe.akka</groupId>
                 <artifactId>akka-cluster_2.12</artifactId>
+                <version>${akka-version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.typesafe.akka</groupId>
+                <artifactId>akka-remote_2.12</artifactId>
                 <version>${akka-version}</version>
             </dependency>
         </dependencies>
