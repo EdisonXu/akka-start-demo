@@ -14,6 +14,7 @@
     <modules>
         <module>cluster</module>
         <module>remoting</module>
+        <module>basic-echo</module>
     </modules>
 
     <properties>
@@ -88,7 +89,7 @@
                         <encoding>${project.build.sourceEncoding}</encoding>
                     </configuration>
                 </plugin>
-                <plugin>
+                <!--<plugin>
                     <groupId>org.codehaus.mojo</groupId>
                     <artifactId>exec-maven-plugin</artifactId>
                     <version>1.6.0</version>
@@ -100,7 +101,7 @@
                             <argument>com.lightbend.akka.sample.AkkaQuickstart</argument>
                         </arguments>
                     </configuration>
-                </plugin>
+                </plugin>-->
             </plugins>
         </pluginManagement>
     </build>
