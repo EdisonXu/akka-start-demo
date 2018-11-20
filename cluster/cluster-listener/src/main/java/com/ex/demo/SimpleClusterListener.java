@@ -3,7 +3,6 @@ package com.ex.demo;
 import akka.actor.AbstractActor;
 import akka.cluster.Cluster;
 import akka.cluster.ClusterEvent;
-import akka.cluster.protobuf.msg.ClusterMessages;
 import akka.event.Logging;
 import akka.event.LoggingAdapter;
 
