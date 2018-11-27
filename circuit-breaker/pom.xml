@@ -9,8 +9,9 @@
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
-    <artifactId>basic-echo</artifactId>
+    <artifactId>circuit-breaker</artifactId>
 
-    <name>basic-echo</name>
+    <name>circuit-breaker</name>
+
 
 </project>
