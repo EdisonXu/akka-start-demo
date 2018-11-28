@@ -69,4 +69,5 @@ local.properties
 ######################
 /log/
 */target/*
+**/target/*
 .merge_file*
