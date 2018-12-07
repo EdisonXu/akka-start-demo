@@ -24,7 +24,7 @@ public class StringProducer {
 
     protected final Materializer materializer = ActorMaterializer.create(system);
 
-    int MAX_MSG_NUM = 10;
+    int MAX_MSG_NUM = 14;
 
     // #producer
     // #settings
@@ -43,8 +43,8 @@ public class StringProducer {
                 Source.range(1, MAX_MSG_NUM)
                         .map(number -> number.toString())
                         //.delay(Duration.ofSeconds(2), DelayOverflowStrategy.backpressure())
-                        .throttle(2, Duration.ofSeconds(1))
-                        .map(value -> new ProducerRecord<String, String>("t0", String.valueOf(random.nextInt(3)),value))
+                        //.throttle(2, Duration.ofSeconds(30))
+                        .map(value -> new ProducerRecord<String, String>("t0", String.valueOf(1),value))
                         .runWith(akka.kafka.javadsl.Producer.plainSink(producerSettings), materializer);
         terminateWhenDone(done);
     }

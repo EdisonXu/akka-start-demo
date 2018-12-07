@@ -1,16 +1,18 @@
 package com.ex.demo.consumer;
 
 import akka.Done;
-import akka.NotUsed;
 import akka.actor.ActorSystem;
 import akka.japi.Pair;
+import akka.kafka.CommitterSettings;
+import akka.kafka.ConsumerMessage;
 import akka.kafka.ConsumerSettings;
 import akka.kafka.Subscriptions;
+import akka.kafka.javadsl.Committer;
 import akka.kafka.javadsl.Consumer;
 import akka.stream.ActorMaterializer;
 import akka.stream.Materializer;
+import akka.stream.javadsl.Keep;
 import akka.stream.javadsl.Sink;
-import akka.stream.javadsl.Source;
 import com.typesafe.config.Config;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -19,6 +21,7 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -56,14 +59,15 @@ public class StringConsumer {
             });
         }
 
-        public CompletionStage<Done> commitOffset(int partition){
-            return CompletableFuture.supplyAsync(() -> {
-                for(TopicPartition p: partitionOffsetMap.keySet()){
-                    if(p.partition() == partition)
-                        partitionOffsetMap.put(p, partitionOffsetMap.get(p)+1);
+        public Long commitOffset(int partition){
+            long latestOffset = -1;
+            for(TopicPartition p: partitionOffsetMap.keySet()){
+                if(p.partition() == partition) {
+                    latestOffset = partitionOffsetMap.get(p)+1;
+                    partitionOffsetMap.put(p, latestOffset);
                 }
-                return Done.done();
-            });
+            }
+            return latestOffset;
         }
 
         public Map<TopicPartition, Long> getPartitionOffsetMap() {
@@ -87,72 +91,167 @@ public class StringConsumer {
                 return record.partition();
             });
         }
-
-        public CompletionStage<Done> workWithPartitions(Pair<TopicPartition, Source<ConsumerRecord<String, byte[]>, NotUsed>> pair){
-            return CompletableFuture.supplyAsync(()->{
-                TopicPartition partition = pair.first();
-                Source<ConsumerRecord<String, byte[]>, NotUsed> source = pair.second();
-                source.map(r-> {
-                    System.out.println("Partition ["+r.partition()+"] got: "+ new String(r.value()));
-                    return null;
-                });
-               return Done.done();
-            });
-        }
     }
 
-    public static void storeOffsetInZk(ActorSystem system){
-
-        // 1. de-serializer of keys
+    public static ConsumerSettings getConsumerSettings(
+            Deserializer keyDeserializer,
+            Deserializer valDeserializer,
+            Config config,
+            String groupId){
         Deserializer<String> keySerializer = new StringDeserializer();
-        // 2. de-serializer of values
         Deserializer<byte[]> valSerializer = new ByteArrayDeserializer();
-        // 3. read config from application.conf including bootstrap servers of the Kafka  cluster
+
+        return ConsumerSettings.create(config, keyDeserializer, valDeserializer)
+                .withGroupId(groupId) // if not defined here, config must contains "group.id"
+                .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+    }
+
+    public static void storeOffsetInZk(boolean partitioned, boolean manualAssignOffset){
+        ActorSystem system = ActorSystem.create("sys");
         Config config = system.settings().config().getConfig("akka.kafka.consumer");
-        // 4. get topic from config
+
+        // get topic from config
         // Note: Normally we shouldn't do like this, this is just a case of reading custom config from config files
         String topic = config.getConfig("kafka-clients").getString("topic.string");
-        // 5. group id
+        // group id
         String groupId = "1";
         // partition number
         int partitionNum = 3;
 
-        // finally, create config settings
-        ConsumerSettings<String, byte[]> consumerSettings = ConsumerSettings.create(config, keySerializer, valSerializer)
-                        .withGroupId(groupId) // if not defined here, config must contains "group.id"
-                        .withProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        Deserializer<String> keyDeserializer = new StringDeserializer();
+        Deserializer<byte[]> valDeserializer = new ByteArrayDeserializer();
+        ConsumerSettings<String, byte[]> consumerSettings = getConsumerSettings(keyDeserializer, valDeserializer, config, groupId);
 
-        ExternalOffsetStorage offsetStorage = new ExternalOffsetStorage("t0", partitionNum);
+        ExternalOffsetStorage offsetStorage = new ExternalOffsetStorage(topic, partitionNum);
         DummyBusinessLogic logic = new DummyBusinessLogic();
 
-        Sink sink = Sink.foreach(System.out::println);
         Materializer materializer = ActorMaterializer.create(system);
 
         // same logic for all partition
-        Consumer.Control control =
-                Consumer.plainSource(
+        if(!partitioned){
+            Consumer.plainSource(
+                    consumerSettings,
+                    Subscriptions.assignmentWithOffset(offsetStorage.getPartitionOffsetMap()))
+                    //Subscriptions.topics(topic))
+                    .mapAsync(partitionNum, record -> logic.work(record).thenApply(partition->offsetStorage.commitOffset(partition)))
+                    .to(Sink.ignore())
+                    .run(materializer);
+        }else{
+            if(!manualAssignOffset)
+                Consumer.plainPartitionedSource(
                         consumerSettings,
-                        Subscriptions.assignmentWithOffset(offsetStorage.getPartitionOffsetMap()))
-                        .mapAsync(partitionNum, logic::work)
-                        .map(partition->offsetStorage.commitOffset(partition))
+                        Subscriptions.topics(topic))
+                        // merge ConsumerRecord from different partition Source
+                        .flatMapMerge(partitionNum, Pair::second)
+                        // use same logic flow to handle ConsumerRecord
+                        .mapAsync(partitionNum, record -> logic.work(record).thenApply(partition->offsetStorage.commitOffset(partition)))
                         .to(Sink.ignore())
                         .run(materializer);
+            else
+                Consumer.plainPartitionedManualOffsetSource(
+                        consumerSettings,
+                        Subscriptions.topics(topic),
+                        offsetStorage::getOffsetsOnAssign)
+                        //.mapAsync(partitionNum, logic::workWithPartitions)
+                        .flatMapMerge(partitionNum, Pair::second)
+                        .mapAsync(partitionNum, record -> logic.work(record).thenApply(partition->offsetStorage.commitOffset(partition)))
+                        .to(Sink.ignore())
+                        .run(materializer);
+        }
+    }
 
-        // plainPartitonedManuallOffsetSource is one source for each partition
-        // so use flatMapMerge to merge them into one single source and pass business logic to deal with
-        Consumer.plainPartitionedManualOffsetSource(
-                consumerSettings,
-                Subscriptions.topics(topic),
-                offsetStorage::getOffsetsOnAssign)
-                //.mapAsync(partitionNum, logic::workWithPartitions)
-                .flatMapMerge(partitionNum, Pair::second)
-                .map(logic::work)
-                .to(Sink.ignore())
-                .run(materializer);
+
+
+    public static void storeOffsetInKafka(boolean partitioned, boolean batchCommit, boolean customBatch, boolean timeBased){
+        ActorSystem system = ActorSystem.create("sys");
+        Config config = system.settings().config().getConfig("akka.kafka.consumer");
+
+        // get topic from config
+        // Note: Normally we shouldn't do like this, this is just a case of reading custom config from config files
+        String topic = config.getConfig("kafka-clients").getString("topic.string");
+        // group id
+        String groupId = "1";
+        // partition number
+        int partitionNum = 3;
+
+        Deserializer<String> keyDeserializer = new StringDeserializer();
+        Deserializer<byte[]> valDeserializer = new ByteArrayDeserializer();
+        ConsumerSettings<String, byte[]> consumerSettings = getConsumerSettings(keyDeserializer, valDeserializer, config, groupId);
+
+        DummyBusinessLogic logic = new DummyBusinessLogic();
+        Materializer materializer = ActorMaterializer.create(system);
+
+        if(!batchCommit){
+            System.out.println("Using single commit");
+            // single commit
+            Consumer.committableSource(consumerSettings, Subscriptions.topics(topic))
+                    // asynchronously finish logic work and fetch the offset to commit
+                    .mapAsync(1, msg-> logic.work(msg.record()).thenApply(partition -> msg.committableOffset()))
+                    // commit offset
+                    .mapAsync(1, offset->offset.commitJavadsl())
+                    .to(Sink.ignore())
+                    .run(materializer);
+        }else{
+            System.out.println("Using batch commit");
+            if(!partitioned){
+                // auto batch commit
+                if(!customBatch){
+                    Consumer.committableSource(consumerSettings, Subscriptions.topics(topic))
+                            .mapAsync(1, msg-> logic.work(msg.record())
+                                    .<ConsumerMessage.Committable>thenApply(partition -> msg.committableOffset())
+                            )
+                            .to(Committer.sink(CommitterSettings.create(config)))
+                            .run(materializer);
+                }else{
+                    if(!timeBased){
+                        // manual batch commit
+                        Consumer.committableSource(consumerSettings, Subscriptions.topics(topic))
+                                .mapAsync(1, msg-> logic.work(msg.record())
+                                        .thenApply(partition -> msg.committableOffset())
+                                )
+                                .batch(
+                                        20,
+                                        ConsumerMessage::createCommittableOffsetBatch,
+                                        ConsumerMessage.CommittableOffsetBatch::updated
+                                )
+                                .mapAsync(3, batch->batch.commitJavadsl())
+                                .to(Sink.ignore())
+                                .run(materializer);
+                    }else {
+                        // time-based aggregation
+                        Consumer.committableSource(consumerSettings, Subscriptions.topics(topic))
+                                .mapAsync(1, msg-> logic.work(msg.record())
+                                        .thenApply(partition -> msg.committableOffset())
+                                )
+                                .groupedWithin(5, Duration.ofSeconds(60))
+                                .map(ConsumerMessage::createCommittableOffsetBatch)
+                                .mapAsync(3, batch->batch.commitJavadsl())
+                                .to(Sink.ignore())
+                                .run(materializer);
+                    }
+                }
+            }else {
+                if(!customBatch){
+                    Consumer.committablePartitionedSource(consumerSettings, Subscriptions.topics(topic))
+                            .flatMapMerge(partitionNum, Pair::second)
+                            .mapAsync(partitionNum, msg->logic.work(msg.record()).thenApply(partition -> msg.committableOffset()))
+                            .batch(20,
+                                    ConsumerMessage::createCommittableOffsetBatch,
+                                    ConsumerMessage.CommittableOffsetBatch::updated
+                            )
+                            .mapAsync(3, batch -> batch.commitJavadsl())
+                            .toMat(Sink.ignore(), Keep.both())
+                            .mapMaterializedValue(Consumer::createDrainingControl)
+                            .run(materializer);
+                }
+            }
+
+        }
+
     }
 
     public static void main(String[] args) {
-        ActorSystem system = ActorSystem.create("sys");
-        StringConsumer.storeOffsetInZk(system);
+        //StringConsumer.storeOffsetInZk(false, false);
+        StringConsumer.storeOffsetInKafka(false,false,true, false);
     }
 }
